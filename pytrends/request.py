@@ -71,7 +71,7 @@ class TrendReq(object):
         """
         while True:
             if "proxies" in self.requests_args:
-                return dict(filter(lambda i: i[0] == 'NID', requests.get(
+                return dict(filter(lambda i: i[0] == 'NID', requests.post(
                     f'{BASE_TRENDS_URL}/?geo={self.hl[-2:]}',
                     timeout=self.timeout,
                     **self.requests_args
@@ -82,7 +82,7 @@ class TrendReq(object):
                 else:
                     proxy = ''
                 try:
-                    return dict(filter(lambda i: i[0] == 'NID', requests.get(
+                    return dict(filter(lambda i: i[0] == 'NID', requests.post(
                         f'{BASE_TRENDS_URL}/?geo={self.hl[-2:]}',
                         timeout=self.timeout,
                         proxies=proxy,

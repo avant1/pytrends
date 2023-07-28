@@ -1,4 +1,5 @@
 import json
+from typing import Callable, Optional
 
 import pandas as pd
 import requests
@@ -10,9 +11,12 @@ from requests import status_codes
 from pytrends import exceptions
 
 from urllib.parse import quote
+import logging
 
 
 BASE_TRENDS_URL = 'https://trends.google.com/trends'
+
+CaptchaTokenCallback = Callable[[str, str], Optional[str]]
 
 
 class TrendReq(object):
@@ -35,7 +39,8 @@ class TrendReq(object):
     ERROR_CODES = (500, 502, 504, 429)
 
     def __init__(self, hl='en-US', tz=360, geo='', timeout=(2, 5), proxies='',
-                 retries=0, backoff_factor=0, requests_args=None):
+                 retries=0, backoff_factor=0, requests_args=None,
+                 captcha_token_provider: CaptchaTokenCallback = None):
         """
         Initialize default values for params
         """
@@ -53,6 +58,14 @@ class TrendReq(object):
         self.backoff_factor = backoff_factor
         self.proxy_index = 0
         self.requests_args = requests_args or {}
+
+        def noop_captcha_token_provider(url: str, action: str) -> Optional[str]:
+            return None
+
+        self.captcha_token_provider: CaptchaTokenCallback = noop_captcha_token_provider
+        if captcha_token_provider is not None:
+            self.captcha_token_provider = captcha_token_provider
+
         self.cookies = self.GetGoogleCookie()
         # intialize widget payloads
         self.token_payload = dict()
@@ -189,12 +202,32 @@ class TrendReq(object):
     def _tokens(self):
         """Makes request to Google to get API tokens for interest over time, interest by region and related queries"""
         # make the request and parse the returned json
-        widget_dicts = self._get_data(
-            url=TrendReq.GENERAL_URL,
-            method=TrendReq.GET_METHOD,
-            params=self.token_payload,
-            trim_chars=4,
-        )['widgets']
+        keywords = self.kw_list if isinstance(self.kw_list, str) else ','.join(self.kw_list)
+        keywords = quote(keywords, safe='/,')
+        # todo pass correct timeframe here too
+        site_url = f'https://trends.google.com/trends/explore?date=now%201-d&q={keywords}&hl=en-US'
+        action = '/trends/api/explore'
+        captcha_token = self.captcha_token_provider(site_url, action)
+
+        if captcha_token is not None:
+            logging.info('Passing captcha token!')
+            response = self._get_data(
+                url=TrendReq.GENERAL_URL,
+                method=TrendReq.POST_METHOD,
+                params=self.token_payload,
+                trim_chars=4,
+                data=captcha_token
+            )
+        else:
+            logging.info('No captcha token available!')
+            response = self._get_data(
+                url=TrendReq.GENERAL_URL,
+                method=TrendReq.GET_METHOD,
+                params=self.token_payload,
+                trim_chars=4,
+            )
+
+        widget_dicts = response['widgets']
         # order of the json matters...
         first_region_token = True
         # clear self.related_queries_widget_list and self.related_topics_widget_list

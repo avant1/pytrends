@@ -5,6 +5,7 @@ import pandas as pd
 import requests
 
 from requests.adapters import HTTPAdapter
+from requests.cookies import RequestsCookieJar
 from requests.packages.urllib3.util.retry import Retry
 from requests import status_codes
 
@@ -13,6 +14,7 @@ from pytrends import exceptions
 from urllib.parse import quote
 import logging
 
+from pytrends.captcha_token_provider import CaptchaTokenProvider, NoopCaptchaTokenProvider
 
 BASE_TRENDS_URL = 'https://trends.google.com/trends'
 
@@ -40,7 +42,7 @@ class TrendReq(object):
 
     def __init__(self, hl='en-US', tz=360, geo='', timeout=(2, 5), proxies='',
                  retries=0, backoff_factor=0, requests_args=None,
-                 captcha_token_provider: CaptchaTokenCallback = None):
+                 captcha_token_provider: CaptchaTokenProvider = None):
         """
         Initialize default values for params
         """
@@ -59,13 +61,11 @@ class TrendReq(object):
         self.proxy_index = 0
         self.requests_args = requests_args or {}
 
-        def noop_captcha_token_provider(url: str, action: str) -> Optional[str]:
-            return None
+        if captcha_token_provider is None:
+            captcha_token_provider = NoopCaptchaTokenProvider()
+        self.captcha_token_provider = captcha_token_provider
 
-        self.captcha_token_provider: CaptchaTokenCallback = noop_captcha_token_provider
-        if captcha_token_provider is not None:
-            self.captcha_token_provider = captcha_token_provider
-
+        self._cookie_details = None
         self.cookies = self.GetGoogleCookie()
         # intialize widget payloads
         self.token_payload = dict()
@@ -84,11 +84,16 @@ class TrendReq(object):
         """
         while True:
             if "proxies" in self.requests_args:
-                return dict(filter(lambda i: i[0] == 'NID', requests.post(
+                response = requests.post(
                     f'{BASE_TRENDS_URL}/?geo={self.hl[-2:]}',
                     timeout=self.timeout,
                     **self.requests_args
-                ).cookies.items()))
+                )
+
+                cookies: RequestsCookieJar = response.cookies
+                self._cookie_details = [c.__dict__ for c in cookies]
+
+                return response.cookies
             else:
                 if len(self.proxies) > 0:
                     proxy = {'https': self.proxies[self.proxy_index]}
@@ -119,7 +124,7 @@ class TrendReq(object):
         else:
             self.proxy_index = 0
 
-    def _get_data(self, url, method=GET_METHOD, trim_chars=0, **kwargs):
+    def _get_data(self, url, method=GET_METHOD, report_captcha: bool = False, trim_chars=0, **kwargs):
         """Send a request to Google and return the JSON response as a Python object
         :param url: the url to which the request will be sent
         :param method: the HTTP method ('get' or 'post')
@@ -161,11 +166,17 @@ class TrendReq(object):
             # some responses start with garbage characters, like ")]}',"
             # these have to be cleaned before being passed to the json parser
             content = response.text[trim_chars:]
+
+            if report_captcha:
+                self.captcha_token_provider.report_success()
             # parse json
             self.GetNewProxy()
             return json.loads(content)
         else:
             if response.status_code == status_codes.codes.too_many_requests:
+
+                # should always be reported, even for requests like /trends/api/explore as they can fail too
+                self.captcha_token_provider.report_access_denied()
                 raise exceptions.TooManyRequestsError.from_response(response)
             raise exceptions.ResponseError.from_response(response)
 
@@ -207,7 +218,7 @@ class TrendReq(object):
         # todo pass correct timeframe here too
         site_url = f'https://trends.google.com/trends/explore?date=now%201-d&q={keywords}&hl=en-US'
         action = '/trends/api/explore'
-        captcha_token = self.captcha_token_provider(site_url, action)
+        captcha_token = self.captcha_token_provider.obtain_token(site_url, action, cookies=self._cookie_details)
 
         if captcha_token is not None:
             logging.info('Passing captcha token!')
@@ -372,6 +383,7 @@ class TrendReq(object):
             method=TrendReq.GET_METHOD,
             trim_chars=5,
             params=region_payload,
+            report_captcha=True,
         )
         df = pd.DataFrame(req_json['default']['geoMapData'])
         if (df.empty):
